@@ -1,0 +1,1741 @@
+---
+title: "Aeroporti e Rotte aeroportuali"
+author: "Cristian Brotto 152104"
+date: "10-02-2025"
+output:
+  ioslides_presentation:
+    css: style.css
+  beamer_presentation: default
+editor_options:
+  chunk_output_type: console
+  markdown:
+    wrap: sentence
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,
+                      eval = TRUE,
+                      warning = FALSE,
+                      message = FALSE
+                      )
+options(scipen = 999) # Disabilita la notazione scientifica
+setTimeLimit(cpu = Inf, elapsed = Inf)  # Disabilita il limite di tempo
+set.seed(100)
+```
+
+```{r Import delle librerie, echo=FALSE, include=FALSE, warning=FALSE}
+if (!require("dplyr")) install.packages("dplyr")
+if (!require("readr")) install.packages("readr")
+if (!require("igraph")) install.packages("igraph")
+if (!require("ggplot2")) install.packages("ggplot2")
+if (!require("ggraph")) install.packages("ggraph")
+if (!require("knitr")) install.packages("knitr")
+if (!require("rnaturalearth")) install.packages("rnaturalearth")
+if (!require("rnaturalearthdata")) install.packages("rnaturalearthdata")
+if (!require("sf")) install.packages("sf")
+if (!require("plotly")) install.packages("plotly")
+if (!require("gridExtra")) install.packages("gridExtra")
+if (!require("wordcloud")) install.packages("wordcloud")
+if (!require("corrplot")) install.packages("corrplot")
+if (!require("ggwordcloud")) install.packages("ggwordcloud")
+if (!require("geosphere")) install.packages("geosphere")
+if (!require("parallel")) install.packages("parallel")
+if (!require("stringr")) install.packages("stringr")
+if (!require("kableExtra")) install.packages("kableExtra")
+if (!require("poweRlaw")) install.packages("poweRlaw")
+if (!require("RColorBrewer")) install.packages("RColorBrewer")
+
+library(dplyr)
+library(readr)
+library(igraph)
+library(ggplot2)
+library(ggraph)
+library(knitr)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(sf)
+library(plotly)
+library(gridExtra)
+library(wordcloud)
+library(corrplot)
+library(ggwordcloud)
+library(geosphere)
+library(parallel)
+library(stringr)
+library(kableExtra)
+library(poweRlaw)
+library(RColorBrewer)
+
+
+```
+
+# Dataset
+
+## Fonte
+
+I dati sugli aeroporti e le rotte mondiali sono stati ottenuti dal repository del portale [OpenFlights](https://github.com/jpatokal/openflights).
+
+OpenFlights è uno strumento che permette di tenere traccia dei propri viaggi in tutto il mondo, cercarli e filtrarli in molti modi interessanti, calcolare automaticamente le statistiche e condividere le mappe risultanti con le rotte in evidenza.
+E' possibile controllare le mappe delle rotte aeroportuali per quasi tutti gli aeroporti del mondo e scoprire le tratte che le compagnie aeree coprono.
+
+I dati messi a disposizione riguardano:
+
+-   [aeroporti](https://raw.githubusercontent.com/jpatokal/openflights/master/data/airports.dat)
+-   [rotte aeree](https://raw.githubusercontent.com/jpatokal/openflights/master/data/routes.dat)
+-   compagnie aeree
+-   aeroplani
+
+```{r Scaricamento dei dataset necessari, eval=FALSE}
+# URL per i dataset di OpenFlights
+urls <- list(
+  airports = "https://raw.githubusercontent.com/jpatokal/openflights/master/data/airports.dat",
+  routes = "https://raw.githubusercontent.com/jpatokal/openflights/master/data/routes.dat",
+)
+
+output_dir <- "openflights_dataset"
+dir.create(output_dir, showWarnings = FALSE)
+for (key in names(urls)) {
+  file_path <- file.path(output_dir, paste0(key, ".csv"))
+  download.file(urls[[key]], file_path)
+}
+```
+
+```{r Lettura dei dataset}
+output_dir <- "openflights_dataset"
+colnames_list <- list(
+  airports = c("Airport_ID", "Name", "City", "Country", "IATA", "ICAO", "Latitude", "Longitude", "Altitude", "Timezone", "DST", "TZ", "Type", "Source"),
+  routes = c("Airline", "Airline_ID", "Source_airport", "Source_airport_ID", "Destination_airport", "Destination_airport_ID", "Codeshare", "Stops", "Equipment")
+)
+
+airports <- read_csv(file.path(output_dir, "airports.csv"), col_names = colnames_list$airports, col_types = cols(.default = "c"))
+airports$Latitude <- round(as.numeric(airports$Latitude),digits = 4)
+airports$Longitude <- round(as.numeric(airports$Longitude),digits = 4)
+routes <- read.csv(file.path(output_dir, "routes.csv"), header = FALSE, col.names = colnames_list$routes)
+
+```
+
+## Informazioni principali contenute nei dataset
+
+### **Airports**
+
+-   `Name`: Nome ufficiale dell'aeroporto.
+-   `City`: Città in cui si trova l'aeroporto.
+-   `Country`: Paese in cui si trova l'aeroporto.
+-   `IATA`: Codice aeroportuale IATA (International Air Transport Association).
+-   `Latitude`: Latitudine geografica.
+-   `Longitude`: Longitudine geografica.
+
+### **Routes**
+
+-   `Source_airport`: Aeroporto di partenza della rotta.
+-   `Destination_airport`: Aeroporto di arrivo della rotta.
+
+## Esempio di `airports` e `routes`
+
+```{r}
+
+#Togliamo gli aereoporti senza codice IATA
+airports_clear <- airports %>%
+  filter(IATA != "\\N")
+
+airports_filtered <- airports_clear %>%
+  select(IATA) %>%
+  rename(name=IATA)
+
+#Togliamo i record che non hanno aereoporti di partenza o destinazione contenuti in "airports_filtered"
+routes_filtered <- routes %>% 
+  filter(Source_airport %in% airports_filtered$name & Destination_airport %in% airports_filtered$name) %>% 
+  select(c(3,5))
+
+#Verifichiamo se ci sono tratte che coinvolgono lo stesso aereoporto di partenza e destinazione
+routes_filtered <- routes_filtered %>%
+  filter(!(Destination_airport == Source_airport & Source_airport == Destination_airport))
+
+
+```
+
+```{r Esempi dei dati nei dataset}
+airports_clear %>%
+  select(IATA, Name, City, Country, Latitude, Longitude) %>%
+  sample_n(5) %>%
+  kable(
+    col.names = c("IATA", "Name", "City", "Country", "Latitude", "Longitude"),
+    align = "c",
+    format = "html",
+    escape = FALSE
+  ) %>%
+  kable_styling(
+    full_width = FALSE,
+    bootstrap_options = c("striped", "hover"),
+    font_size = 12,
+  ) %>%
+  row_spec(0, background = "steelblue", color = "white") %>%
+  add_header_above(c("Airports" = 6), bold = TRUE, line = TRUE)
+
+routes %>%
+  select(Source_airport, Destination_airport) %>%
+  sample_n(5) %>%
+  kable(
+    col.names = c("Source Airport", "Destination Airport"),
+    align = "c",
+    format = "html",
+    escape = FALSE
+  ) %>%
+  kable_styling(
+    full_width = FALSE,
+    bootstrap_options = c("striped", "hover"),
+    font_size = 12,
+  ) %>%
+  row_spec(0, background = "steelblue", color = "white") %>%
+  add_header_above(c("Routes" = 2), bold = TRUE, line = TRUE)
+
+
+```
+
+## Visualizzazione di qualche dato
+
+### Distribuzione degli aereoporti per stato
+
+```{r fig.width=8, fig.height=8}
+airport_counts <- airports %>%
+  group_by(Country) %>%
+  summarise(Observations = n()) %>%
+  ungroup()
+
+# Rinomina selettivamente "United States" in "United States of America"
+airport_counts <- airport_counts %>%
+  mutate(Country = recode(Country, 
+                          "United States" = "United States of America"))
+
+
+world <- ne_countries(scale = "medium", returnclass = "sf")
+world_data_airports <- world %>%
+  left_join(airport_counts, by = c("name" = "Country"))
+
+# Sostituzione dei valori NA con 0 (paesi senza dati)
+world_data_airports$Observations[is.na(world_data_airports$Observations)] <- 0
+
+world_data_airports_clean <- world_data_airports %>%
+  select(sov_a3, Observations, geometry)
+
+ggplot(world_data_airports_clean) +
+    geom_sf(aes(fill = Observations)) +
+    scale_fill_viridis_c(option = "plasma", trans = "sqrt", na.value = "gray90") +
+    theme_minimal() +
+    theme(
+        plot.margin = unit(c(0,0,0,0), "cm"),
+        legend.key.size = unit(0.8, "cm"),
+        legend.title = element_text(size = 10, hjust = 0.5),
+        legend.text = element_text(size = 8),
+        legend.position = "bottom",
+    ) +
+    labs(
+        fill = "Numero di aeroporti"
+    )
+
+```
+
+```{r}
+# Le prime 8 nazioni con più aeroporti
+airport_counts %>%
+  arrange(desc(Observations)) %>%
+  head(8) %>% 
+  kable(
+    col.names = c("Country","Frequenza"), 
+    align = "c",
+    format = "html",
+    escape = FALSE,
+    row.names = FALSE,
+    caption = "Le prime 8 nazioni con più aeroporti"
+
+  ) %>%
+  kable_styling(
+    full_width = FALSE,  
+    bootstrap_options = c("striped", "hover"), 
+    font_size = 12      
+  ) %>%
+  row_spec(0, background = "steelblue", color = "white") %>% 
+  column_spec(1, width = "3em") %>% 
+  column_spec(2, width = "7em")     
+
+
+```
+
+### Visualizzazione degli aeroporti per numero di rotte di partenza e destinazione
+
+```{r}
+source_freq <- routes_filtered %>%
+  count(Source_airport, name = "Frequency") %>%
+  arrange(desc(Frequency)) %>% head(100)
+
+destination_freq <- routes_filtered %>%
+  count(Destination_airport, name = "Frequency") %>%
+  arrange(desc(Frequency)) %>% head(100)
+
+
+p1 <- ggplot(source_freq, aes(label = Source_airport, size = Frequency)) +
+  geom_text_wordcloud_area(color = "blue", max_steps = 10) +
+  scale_size_area(max_size = 15) +
+  theme_minimal() +
+  ggtitle("Aeroporti di partenza")
+
+p2 <- ggplot(destination_freq, aes(label = Destination_airport, size = Frequency)) +
+  geom_text_wordcloud_area(color = "red", max_steps = 1e3) +
+  scale_size_area(max_size = 15) +
+  theme_minimal() +
+  ggtitle("Aeroporti di destinazione")
+
+grid.arrange(p1,p2, nrow=1, ncol = 2)
+```
+
+## La rete degli aeroporti
+
+```{r Creazione dell oggetto grafo}
+
+g <- graph_from_data_frame(d = routes_filtered, vertices = airports_filtered, directed = TRUE)
+
+grado_totale <- degree(g, mode = "all")
+nodi_con_grado <- V(g)[grado_totale > 0]
+g <- induced_subgraph(g, vids = nodi_con_grado)
+airports_clear_zero <- airports_clear[airports_clear$IATA %in% V(g)$name, ]
+airports_clear_zero$Latitude <- as.numeric(airports_clear_zero$Latitude)
+airports_clear_zero$Longitude <- as.numeric(airports_clear_zero$Longitude)
+
+V(g)$AirportName <- airports_clear_zero$Name
+V(g)$City <- airports_clear_zero$City
+V(g)$Country <- airports_clear_zero$Country
+V(g)$Latitude <- airports_clear_zero$Latitude
+V(g)$Longitude <- airports_clear_zero$Longitude
+V(g)$TZ <- airports_clear_zero$TZ
+V(g)$Continent <- sapply(V(g)$TZ, function(tz) strsplit(tz, "/")[[1]][1])
+
+
+
+#Creazione del grafo per fare il plot con tutti i nodi disponibili (anche grado=0)
+f <- graph_from_data_frame(d = routes_filtered, vertices = airports_filtered, directed = TRUE)
+V(f)$AirportName <- airports_clear$Name
+V(f)$Latitude <- airports_clear$Latitude
+V(f)$Longitude <- airports_clear$Longitude
+
+full_nodes <- data.frame(
+  IATA = V(f)$name,      
+  lat = as.numeric(V(f)$Latitude), 
+  lon = as.numeric(V(f)$Longitude) 
+)
+full_routes <- as_data_frame(f, what = "edges")
+full_routes_coords <- full_routes %>%
+  left_join(full_nodes, by = c("from" = "IATA")) %>%
+  rename(lat_from = lat, lon_from = lon) %>%
+  left_join(full_nodes, by = c("to" = "IATA")) %>%
+  rename(lat_to = lat, lon_to = lon)
+```
+
+I nodi sono rappresentati dal codice IATA degli aeroporti
+
+Gli archi sono rappresentati da ogni tratta dove la sorgente e la destinazioni sono i codici IATA degli aeroporti
+
+### Il grafo
+
+```{r Creazione visualizzazione grafo ggraph}
+#Funzione per creare un grafo con meno nodi dell'originale
+sample_graph <- function(graph, max_nodes = 5000) {
+  if (vcount(graph) > max_nodes) {
+    degrees <- degree(graph)
+    top_nodes <- order(degrees, decreasing = TRUE)[1:max_nodes]
+    induced_subgraph(graph, V(graph)[top_nodes])
+  } else {
+    graph
+  }
+}
+
+g_sampled1 <- sample_graph(g)
+node_degrees <- degree(g_sampled1)
+g_filtered <- induced_subgraph(g_sampled1, which(node_degrees > 8))
+ggraph(g_filtered, layout = 'fr') + 
+  geom_edge_link(alpha = 0.04, color = "gray") +
+  geom_node_point(size = 1, alpha = 0.6) +
+  theme_void()+
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 10),
+    legend.position = "none"
+  ) +
+  labs(title = "Layout Fruchterman-Reingold")
+
+ggraph(g_filtered, layout = 'kk') + 
+  geom_edge_link(alpha = 0.04, color = "gray") +
+  geom_node_point(size = 1, alpha = 0.6) +
+  theme_void()+
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 10),
+    legend.position = "none"
+  ) +
+  labs(title = "Layout Kamada-Kawai")
+
+
+```
+
+### Il grafo nel planisfero
+
+```{r eval=TRUE}
+world_map <- map_data("world")
+
+nodes <- data.frame(
+  IATA = V(g)$name,       
+  lat = as.numeric(V(g)$Latitude),  
+  lon = as.numeric(V(g)$Longitude)
+)
+
+routes <- as_data_frame(g, what = "edges")
+routes_coords <- routes %>%
+  left_join(nodes, by = c("from" = "IATA")) %>%
+  rename(lat_from = lat, lon_from = lon) %>%
+  left_join(nodes, by = c("to" = "IATA")) %>%
+  rename(lat_to = lat, lon_to = lon)
+```
+
+```{r Creazione grafici con nodi e archi}
+
+ggplot()+
+  geom_polygon(data = world_map, aes(x = long, y = lat, group = group),
+               color = "black", fill = "lightgray", size = 0.1) +
+  geom_point(data = full_nodes, aes(x = lon, y = lat), color = "red", size = 0.4) +
+  theme_minimal() +
+  theme(axis.text = element_blank(), axis.title = element_blank(), plot.margin = margin(0, 0, 0, 0)) +
+  ggtitle("")
+
+ggplot() +
+  geom_polygon(data = world_map, aes(x = long, y = lat, group = group),
+               color = "black", fill = "lightgray", size = 0.1) +
+  geom_curve(data = routes_coords, aes(x = lon_from, y = lat_from, xend = lon_to, yend = lat_to),
+             color = "blue", linewidth = 0.2, curvature = 0.2, alpha = 0.03) +
+  theme_void() +
+  theme(axis.text = element_blank(), axis.title = element_blank(), plot.margin = margin(0, 0, 0, 0)) +
+  ggtitle("")
+
+```
+
+### Il grafo italiano
+
+```{r fig.height=6, fig.width=5}
+italy_map <- map_data("world") %>% 
+  filter(region == "Italy") 
+
+nodi_italiani <- V(g)[V(g)$Country == "Italy"]
+sottoinsieme_italiani <- induced_subgraph(g, vids = nodi_italiani)
+
+nodes_italy <- data.frame(
+  IATA = V(sottoinsieme_italiani)$name,
+  lat = V(sottoinsieme_italiani)$Latitude,
+  lon = V(sottoinsieme_italiani)$Longitude
+)
+
+nodes_italy$lon <- as.numeric(nodes_italy$lon)
+nodes_italy$lat <- as.numeric(nodes_italy$lat)
+
+routes_italy <- as_data_frame(sottoinsieme_italiani, what = "edges") %>%
+  mutate(
+    lat_from = nodes_italy$lat[match(from, nodes_italy$IATA)],
+    lon_from = nodes_italy$lon[match(from, nodes_italy$IATA)],
+    lat_to = nodes_italy$lat[match(to, nodes_italy$IATA)],
+    lon_to = nodes_italy$lon[match(to, nodes_italy$IATA)]
+  )
+
+ggplot() +
+  geom_polygon(data = italy_map, aes(x = long, y = lat, group = group), fill = "lightgrey", color = "black") +
+  geom_curve(data = routes_italy, aes(x = lon_from, y = lat_from, xend = lon_to, yend = lat_to), 
+             color = "blue", linewidth = 0.2, alpha = 0.2, curvature = 0.2) +
+  geom_point(data = nodes_italy, aes(x = lon, y = lat), color = "red", size = 2) +
+  theme_void() +
+  labs(title = "")
+
+```
+
+# Analisi preventiva
+
+## Pulizia dei dati
+
+### Rimozione degli aeroporti senza connessioni
+
+```{r echo=FALSE}
+full_nodes <- full_nodes %>% mutate(
+  Full_Degree_Centrality=degree(f,mode = "all"),
+  Latitude = as.numeric(V(f)$Latitude),
+  Longitude = as.numeric(V(f)$Longitude)
+  )
+num_zero_degree <- full_nodes %>% filter(full_nodes$Full_Degree_Centrality==0) %>% count() %>%  pull()
+```
+
+La rete è composta da `r vcount(f)` aeroporti, di cui `r num_zero_degree` senza connessioni e `r vcount(f)-num_zero_degree` con almeno una connessione.
+
+```{r}
+full_nodes_plotzerodegree <- full_nodes %>% 
+  mutate(IsZeroDegree = ifelse(Full_Degree_Centrality == 0, "TRUE", "FALSE"))
+
+ggplot()+
+  geom_polygon(data = world_map, aes(x = long, y = lat, group = group),
+               color = "black", fill = "lightgray", size = 0.1) +
+  geom_point(data = full_nodes_plotzerodegree, aes(x = Longitude, y = Latitude, color = IsZeroDegree), size = 0.4) +
+  theme_minimal() +
+  theme(axis.text = element_blank(), axis.title = element_blank(), plot.margin = margin(0, 0, 0, 0)) +
+  scale_color_manual(values = c("TRUE" = "red", "FALSE" = "blue")) +
+    guides(color = guide_legend(override.aes = list(size = 4)))+
+  ggtitle("Le due tipologie di aeroporti in base alle connessioni")
+
+
+```
+
+La distribuzione delle connessioni:
+
+```{r echo=FALSE, eval=TRUE, fig.height=5, fig.width=8}
+# Creiamo due sottoinsiemi per grado < 100 e grado > 100 nel grafo f completo dei nodi
+distribuzione_gradi <- degree_distribution(f)
+df_gradi <- data.frame(
+  grado = 0:(length(distribuzione_gradi) - 1), 
+  frequenza = distribuzione_gradi 
+)
+
+
+df_gradi_100 <- df_gradi[df_gradi$grado < 100, ]
+df_gradi_100plus <- df_gradi[df_gradi$grado >= 100, ]
+
+# Plot per grado < 100
+plot_gradi_100 <- ggplot(df_gradi_100, aes(x = grado, y = frequenza)) +
+  geom_bar(stat = "identity", fill = "steelblue", color = "black") +
+  scale_x_continuous(breaks = seq(0, max(df_gradi_100$grado), by = 10)) +
+  scale_y_continuous(breaks = seq(0.0, 0.5, by=0.05))+
+  labs(title = "Distribuzione dei Gradi (Grado < 100)", x = "Grado", y = "Frequenza") +
+  theme_minimal()
+
+# Plot per grado >= 100
+plot_gradi_100plus <- ggplot(df_gradi_100plus, aes(x = grado, y = frequenza)) +
+  geom_bar(stat = "identity", fill = "steelblue", color = "black") +
+  scale_x_continuous(breaks = seq(100, max(df_gradi_100plus$grado), by = 200)) +
+  labs(title = "Distribuzione dei Gradi (Grado >= 100)", x = "Grado", y = "Frequenza") +
+  theme_minimal()
+
+#Provo a rimuovere i nodi con grado == 0
+df_gradi <- df_gradi %>% filter(df_gradi$grado>0)
+df_gradi_100 <- df_gradi[df_gradi$grado < 100, ]
+
+# Plot per grado < 100
+plot_gradi_100_1 <- ggplot(df_gradi_100, aes(x = grado, y = frequenza)) +
+  geom_bar(stat = "identity", fill = "steelblue", color = "black") +
+  scale_x_continuous(breaks = seq(0, max(df_gradi_100$grado), by = 10)) +
+  scale_y_continuous(breaks = seq(0.0, 0.5, by=0.05))+
+  labs(title = "Distribuzione dei Gradi (0 < Grado < 100)", x = "Grado", y = "Frequenza") +
+  theme_minimal()
+
+
+grid.arrange(plot_gradi_100, plot_gradi_100plus,plot_gradi_100_1, nrow = 2, ncol = 2)
+
+
+gradi_nodi <- degree(f)
+nodi_grado_minore_100 <- sum(gradi_nodi < 100)
+
+```
+
+Il numero degli aeroporti con grado minore di 100 è `r nodi_grado_minore_100` su un totale di `r vcount(f)`.
+
+Analizziamo numericamente la distribuzione per verificare se segue una distribuzione power-law.
+
+```{r}
+df_gradi <- df_gradi %>% filter(grado > 0, frequenza > 0)
+
+m_pl <- displ$new(df_gradi$grado)
+m_exp <- disexp$new(df_gradi$grado)
+
+# Stimiamo il parametro gamma (esponente della power-law)
+est_pl <- estimate_xmin(m_pl)
+m_pl$setXmin(est_pl$xmin)
+m_pl$pars <- estimate_pars(m_pl)
+gamma_stimato <- m_pl$pars
+
+# Stimiamo lambda (parametro della distribuzione esponenziale)
+est_exp <- estimate_xmin(m_exp)
+m_exp$setXmin(est_exp$xmin)
+m_exp$pars <- estimate_pars(m_exp)
+lambda_stimato <- m_exp$pars
+
+
+est_pl <- estimate_xmin(m_pl)
+m_pl$setXmin(est_pl$xmin)
+m_exp$setXmin(est_pl$xmin)
+comp <- compare_distributions(m_pl, m_exp)
+
+```
+
+La stima dell'esponente è `r gamma_stimato`, distante da un valore compreso tra 2 e 3 tipico.
+
+Stimiamo l'esponente della distribuzione esponenziale: questo valore è `r lambda_stimato`.
+Essendo minore di 0.01, quindi la distribuzione è meno larga e potrebbe essere non adatta.
+
+La distribuzione esponenziale sembra adattarsi leggermente meglio della power-law, ma la differenza, che vale `r comp$test_statistic`, non è statisticamente significativa.
+Esse sono molto simili nel descrivere i dati, una non è superiore all'altra.
+
+Il test di verifica se la power-law è significativamente meglio della distribuzione esponenziale possiede p-value `r comp$p_one_sided` e indica che non c'è una forte evidenza che una distribuzione sia nettamente migliore dell'altra.
+
+Il test di verifica se le distribuzioni hanno differenze significative possiede p-value `r comp$p_two_sided` e conferma che la differenza tra le distribuzioni è molto piccola.
+
+In sintesi, la rete non mostra una chiara superiorità di adattamento né alla power-law né alla distribuzione esponenziale.
+
+### **Assortatività della rete**
+
+```{r}
+assortativita <- assortativity(g, values = degree(g))
+```
+
+L'assortività, pari a `r assortativita`, è un valore molto vicino a zero, il che indica che la rete non mostra una tendenza significativa a favorire connessioni tra aeroporti con gradi simili.
+
+La struttura della rete dipende più dalla geografia o dalle rotte commerciali che da una scelta basata sul grado.
+
+# Analisi della rete
+
+```{r}
+in_degree_centrality <- degree(g, mode = "in")
+out_degree_centrality <- degree(g, mode = "out")
+full_degree_centrality <- degree(g, mode="all")
+betweenness_centrality <- betweenness(g, directed = TRUE, normalized = TRUE)
+closeness_centrality <- closeness(g, mode = "all", normalized = TRUE)
+hits_scores <- hits_scores(g)
+hub_scores <- hits_scores$hub
+authority_scores <- hits_scores$authority
+pagerank_scores <- page_rank(g, directed = TRUE)$vector
+
+metrics_df <- data.frame(
+  Nodo = V(g)$name,
+  In_Degree_Centrality = in_degree_centrality,
+  Out_Degree_Centrality = out_degree_centrality,
+  Full_Degree_Centrality = full_degree_centrality,
+  Betweenness = betweenness_centrality,
+  Closeness = closeness_centrality,
+  Hub_Score = hub_scores,
+  Authority_Score = authority_scores,
+  PageRank = pagerank_scores,
+  Latitude = as.numeric(V(g)$Latitude),
+  Longitude = as.numeric(V(g)$Longitude)
+)
+
+```
+
+## Quali sono le dimensioni e le caratteristiche della rete?
+
+```{r echo=FALSE}
+num_nodi <- vcount(g)
+num_archi <- ecount(g)
+densita <- edge_density(g)
+diametro <- diameter(g)
+comp_connesse <- components(g)
+is_strongly_connected <- is_connected(g, mode = "strong")
+is_weakly_connected <- is_connected(g, mode = "weak")
+```
+
+Dimensioni e caratteristiche:
+
+-   Il grafo ha `r num_nodi` nodi e `r num_archi` archi.
+-   La densità del grafo è `r densita`.
+-   Il diametro del grafo è `r diametro`.
+-   Il numero di componenti connesse è `r comp_connesse$no`.
+-   Il grafo è fortemente connesso? `r is_strongly_connected`.
+-   Il grafo è debolmente connesso? `r is_weakly_connected`.
+
+## Qual è la topologia della rete degli aeroporti? È una rete completamente connessa o esistono componenti isolate?
+
+```{r echo=FALSE}
+comp_connesse <- components(g, mode = "strong")
+num_componenti_connesse <- length(comp_connesse$csize)
+componente_fc <- which.max(comp_connesse$csize)
+nodi_componente_fc <- comp_connesse$csize[componente_fc]
+nodi_isolati <- length(which(comp_connesse$csize == 1))
+
+nodi_componente_gigante <- which(comp_connesse$membership == componente_fc)
+aeroporti_componente <- data.frame(
+  Nodo = V(g)$name,
+  Latitude = as.numeric(V(g)$Latitude),
+  Longitude = as.numeric(V(g)$Longitude),
+  ComponenteFC = ifelse(comp_connesse$membership == componente_fc, "CFC", "Non CFC")
+)
+
+altre_componenti <- comp_connesse$csize[comp_connesse$csize > 1 & comp_connesse$csize < max(comp_connesse$csize)]
+nodi_altre_componenti <- sum(altre_componenti)
+```
+
+La rete degli aeroporti presenta una struttura complessa con una componente fortemente connessa principale e alcune componenti isolate.
+
+```{r echo=FALSE}
+
+ggplot() +
+  geom_polygon(data = world_map, aes(x = long, y = lat, group = group),
+               color = "black", fill = "lightgray", size = 0.4) +
+  geom_point(data = aeroporti_componente, 
+             aes(x = Longitude, y = Latitude, color = ComponenteFC), 
+             size = 0.7) +
+  theme_void() +
+  theme(axis.text = element_blank(),
+        axis.title = element_blank(),
+        plot.margin = margin(0, 0, 0, 0)) +
+  ggtitle("Aeroporti nella componente fortemente connessa più grande") +
+  scale_color_manual(values = c("CFC" = "blue", "Non CFC" = "red"))
+
+```
+
+Il numero totale di componenti fortemente connesse è `r num_componenti_connesse`.
+La componente fortemente connessa più grande è quella di indice `r componente_fc`, composta da `r nodi_componente_fc` nodi.
+I rimanenti `r vcount(g)-nodi_componente_fc` nodi si dividono tra i nodi isolati, cioè le componenti di dimensione 1 di numero `r nodi_isolati`, e le altre componenti fortemente connesse: una di dimensione 10, tre di dimensione 4 e due di dimensione 2.
+
+## E' una rete piccolo mondo?
+
+```{r}
+
+g_1 <- induced_subgraph(g, which(components(g)$membership == 1))
+
+is_small_world <- function(g) {
+  C <- transitivity(g, type = "average")
+  L <- mean_distance(g, directed = TRUE)
+  g_random <- sample_gnm(vcount(g), ecount(g))
+  
+  C_random <- transitivity(g_random, type = "average")
+  L_random <- mean_distance(g_random, directed = FALSE)
+  
+  clustering_ratio <- C / C_random
+  path_length_ratio <- L / L_random
+  ratio <- clustering_ratio / path_length_ratio
+  
+  results <- list(
+    "C" = C,
+    "L" = L,
+    "C_random" = C_random,
+    "L_random" = L_random,
+    "ClusteringRatio" = clustering_ratio,
+    "PathLengthRatio" = path_length_ratio,
+    "SmallWorldRatio" = ratio
+  )
+  
+  return(results)
+}
+results <- is_small_world(g_1)
+```
+
+Consideriamo il grafo composto dai soli nodi della Componente Fortemente Connessa più grande.
+
+Il grafo analizzato mostra un **coefficiente di clustering** significativamente più alto rispetto al grafo casuale, `r as.numeric(results$C)` contro `r results$C_random` e il loro rapporto `r results$ClusteringRatio` indica una struttura altamente aggregata.
+
+```{r}
+
+clustering_values <- transitivity(g_1, type = "local", isolates = "zero")
+df_clustering <- data.frame(Clustering = clustering_values)
+
+ggplot(df_clustering, aes(x = Clustering)) +
+  geom_histogram(binwidth = 0.05, fill = "steelblue", color = "black", alpha = 0.8) +
+  labs(title = "Distribuzione dei Coefficienti di Clustering",
+       x = "Coefficiente di Clustering",
+       y = "Frequenza") +
+  scale_y_continuous(breaks = seq(0, max(table(df_clustering$Clustering)), by = 200)) +
+  theme_minimal()
+
+```
+
+Tuttavia, il rapporto della **lunghezza media dei cammini** ( `r results$L` / `r results$L_random` = `r results$PathLengthRatio` ) suggerisce che le connessioni globali non sono abbastanza efficienti per essere considerate "Small-World" nel senso stretto.
+
+```{r}
+shortest_paths_length <- distances(g_1)
+smallworld_df <- data.frame(Lunghezza = as.vector(shortest_paths_length))
+smallworld_df <- smallworld_df[smallworld_df$Lunghezza != Inf, ,drop=FALSE]
+total_paths <- sum(smallworld_df$Lunghezza != Inf)
+
+
+ggplot(smallworld_df, aes(x = Lunghezza)) +
+  geom_histogram(binwidth = 1, fill = "darkorange", color = "black", alpha = 0.8) +
+  labs(title = paste("Distribuzione delle Lunghezze dei Cammini\n(Totale Percorsi:", total_paths, ")"),
+       x = "Lunghezza",
+       y = "Frequenza") +
+  theme_minimal()
+
+```
+
+Lo **SmallWorldRatio**, considerando il suo valore uguale a `r results$SmallWorldRatio`, si può dire che è significativamente maggiore di 1, e quindi il grafo presenta una struttura che combina sia un elevato coefficiente di clustering che una bassa lunghezza media dei cammini, tipica delle reti small-world.
+
+Considerando tutto però, non si può dare un'indicazione precisa sulla tipologia della rete.
+Sembra small-world con un clustering elevato e una lunghezza dei cammini non eccessivamente alta, ma non del tutto visto che la metrica diretta C/L vale `r results$C/results$L` e la distribuzione dei gradi non segue una Poisson (e neanche una power-law).
+
+## Come gli aeroporti si dividono in comunità?
+
+Analisi delle comunità tramite l'algoritmo di Louvain.
+
+### Mondo
+
+```{r}
+
+
+graph_undirected <- as_undirected(g, mode = "collapse")
+communities_undirected <- cluster_louvain(graph_undirected)
+comunita_dimensioni <- table(communities_undirected$membership)
+comunita_ordinate <- sort(comunita_dimensioni, decreasing = TRUE)
+
+prime_10=head(comunita_ordinate,n=10)
+top_9_comunita <- as.numeric(names(comunita_ordinate[1:9]))
+
+cluster_df <- data.frame(
+  Nodo = V(graph_undirected)$name,
+  Latitude = as.numeric(V(graph_undirected)$Latitude),
+  Longitude = as.numeric(V(graph_undirected)$Longitude),
+  Community = communities_undirected$membership
+)
+
+cluster_df$Color <- ifelse(cluster_df$Community %in% top_9_comunita,
+                           cluster_df$Community,
+                           "Other")
+cluster_df_filter <- cluster_df %>% filter(Color!="Other")
+cluster_df_filter$Color <- as.factor(cluster_df_filter$Color)
+
+
+
+community_indices = names(prime_10)
+community_values = prime_10
+top_9_indices <- community_indices[1:9]
+top_9_values <- community_values[1:9]
+
+table_data <- rbind(top_9_values)
+rownames(table_data) <- c("Valori")
+col_names <- c("Indici", as.character(top_9_indices))
+
+```
+
+```{r}
+kable(
+  table_data,
+  col.names = top_9_indices,
+  align = "c",
+  format = "html",
+  escape = FALSE,
+  row.names = FALSE
+) %>%
+  kable_styling(
+    full_width = FALSE, 
+    bootstrap_options = c("striped", "hover"),
+    font_size = 12      
+  ) %>% 
+  add_header_above(c(" " = 1, "Indici e Valori" = 8)) 
+
+
+num_communities <- length(unique(cluster_df_filter$Community))
+color_palette <- brewer.pal(n = num_communities, name = "Set1")
+
+ggplot() +
+  geom_polygon(data = world_map, aes(x = long, y = lat, group = group),
+               color = "black", fill = "lightgray", size = 0.5) +
+  geom_point(data = cluster_df_filter, 
+             aes(x = Longitude, y = Latitude, color = as.factor(Community)), 
+             size = 0.5) +
+  theme_void() +
+scale_color_manual(name = "Comunità", values = setNames(color_palette,unique(cluster_df_filter$Community)))+
+  theme(axis.text = element_blank(),
+        axis.title = element_blank(),
+        plot.margin = margin(5, 5, 5, 5)) +
+  guides(color = guide_legend(override.aes = list(size = 4))) +
+  ggtitle("   Divisione nel planisfero")
+
+
+```
+
+Vengono esclusi `r sum(comunita_dimensioni)-sum(top_9_values)` nodi che formano `r as.numeric(tail(names(sizes(communities_undirected)),n=1))-9` comunità.
+
+Considerando che l'algoritmo ha trovato una partizione con modularità finale pari a `r last(communities_undirected$modularity)` si può dire che la suddivisione in comunità è significativa.
+
+```{r}
+algorithms <- list(
+  Louvain = cluster_louvain(graph_undirected),
+  FastGreedy = cluster_fast_greedy(graph_undirected),
+  Walktrap = cluster_walktrap(graph_undirected),
+  Infomap = cluster_infomap(graph_undirected),
+  LabelPropagation = cluster_label_prop(graph_undirected)
+)
+
+modularity_scores <- sapply(algorithms, modularity)
+
+results <- data.frame(
+  Algorithm = names(modularity_scores),
+  Modularity = modularity_scores
+)
+
+short_names <- c("Louvain", "FastGr", "Walk", "Infomap", "LabelProp")
+barplot(results$Modularity, names.arg = short_names, col = "skyblue",
+        main = "Confronto della modularità tra diversi algoritmi",
+        ylab = "Modularità", ylim = c(0, max(results$Modularity) + 0.1))
+```
+
+### Europa
+
+```{r fig.height=6, fig.width=8}
+european_countries <- c("Italy", "France", "Germany", "Spain", "Portugal", "Belgium",
+                       "Netherlands", "Luxembourg", "Switzerland", "Austria", "Poland",
+                       "Czech Republic", "Slovakia", "Hungary", "Slovenia", "Croatia",
+                       "Bosnia and Herzegovina", "Serbia", "Montenegro", "Kosovo", "Albania",
+                       "North Macedonia", "Greece", "Bulgaria", "Romania", "Moldova",
+                       "Ukraine", "Belarus", "Lithuania", "Latvia", "Estonia",
+                       "Denmark", "Norway", "Sweden", "Finland", "Turkey",
+                       "United Kingdom", "Ireland", "UK")
+
+nodi_europa <- V(g)[V(g)$Country %in% european_countries]
+sottoinsieme_europa <- induced_subgraph(g, vids = nodi_europa)
+filter_spain <- c("FUE", "VDE", "SPC", "LPA", "ACE", "TFS", "TFN", "GMZ", "MLN", "SMA",
+                  V(sottoinsieme_europa)[V(sottoinsieme_europa)$Longitude < -10]$name, "LYR")
+
+nodi_filtrati <- V(sottoinsieme_europa)[!(V(sottoinsieme_europa)$name %in% filter_spain)]
+sottoinsieme_filtrato <- induced_subgraph(sottoinsieme_europa, vids = nodi_filtrati)
+graph_undirected <- as_undirected(sottoinsieme_filtrato, mode = "collapse")
+
+
+communities_undirected <- cluster_louvain(graph_undirected)
+comunita_dimensioni <- table(communities_undirected$membership)
+comunita_ordinate <- sort(comunita_dimensioni, decreasing = TRUE)
+
+comunita_grafico <- names(comunita_ordinate[comunita_ordinate!=1])
+comunita_grafico_1 <- sum(as.numeric(comunita_ordinate[comunita_ordinate==1]))
+
+cluster_df <- data.frame(
+  Nodo = V(graph_undirected)$name,
+  Latitude = as.numeric(V(graph_undirected)$Latitude),
+  Longitude = as.numeric(V(graph_undirected)$Longitude),
+  Community = communities_undirected$membership
+)
+
+
+
+europe_map <- map_data("world") %>%
+  filter(region %in% european_countries & lat < 72)
+
+num_clusters <- length(unique(cluster_df$Community))
+color_palette <- brewer.pal(num_clusters, "Set1")
+
+
+
+ggplot() +
+  geom_polygon(data = europe_map, aes(x = long, y = lat, group = group),
+               color = "black", fill = "lightgray", size = 0.5) +
+  geom_point(data = (cluster_df %>% filter(Community %in% comunita_grafico)), 
+             aes(x = Longitude, y = Latitude, color = as.factor(Community)), 
+             size = 1.5) +
+  scale_color_manual(name = "Comunità", values = color_palette) + 
+  theme_void() +
+  theme(axis.text = element_blank(),
+        axis.title = element_blank(),
+        plot.margin = margin(5, 5, 5, 5))+
+  guides(color = guide_legend(override.aes = list(size = 4))) +
+  ggtitle("   Divisione in comunità degli aeroporti a livello europeo")
+```
+
+Vengono esclusi `r comunita_grafico_1` nodi che formano comunità singole.
+
+```{r}
+algorithms <- list(
+  Louvain = cluster_louvain(graph_undirected),
+  FastGreedy = cluster_fast_greedy(graph_undirected),
+  Walktrap = cluster_walktrap(graph_undirected),
+  Infomap = cluster_infomap(graph_undirected),
+  LabelPropagation = cluster_label_prop(graph_undirected)
+)
+
+modularity_scores <- sapply(algorithms, modularity)
+
+results <- data.frame(
+  Algorithm = names(modularity_scores),
+  Modularity = modularity_scores
+)
+
+short_names <- c("Louvain", "FastGr", "Walk", "Infomap", "LabelProp")
+barplot(results$Modularity, names.arg = short_names, col = "skyblue",
+        main = "Confronto della modularità tra diversi algoritmi",
+        ylab = "Modularità", ylim = c(0, max(results$Modularity) + 0.1))
+```
+
+Nessun algoritmo da valori di modularità adeguati per confermare che le comunità sono ben definite.
+
+### America
+
+```{r, fig.width=5, fig.height=5}
+nodi_america <- V(g)[V(g)$Continent=="America"]
+sottoinsieme_america <- induced_subgraph(g, vids = nodi_america)
+graph_undirected <- as_undirected(sottoinsieme_america, mode = "collapse")
+
+communities_undirected <- cluster_louvain(graph_undirected)
+comunita_dimensioni <- table(communities_undirected$membership)
+comunita_ordinate <- head(sort(comunita_dimensioni, decreasing = TRUE),n=9)
+
+comunita_grafico <- names(comunita_ordinate[comunita_ordinate!=1])
+comunita_grafico_1 <- sum(as.numeric(comunita_ordinate[comunita_ordinate==1]))
+
+cluster_df <- data.frame(
+  Nodo = V(graph_undirected)$name,
+  Latitude = as.numeric(V(graph_undirected)$Latitude),
+  Longitude = as.numeric(V(graph_undirected)$Longitude),
+  Community = communities_undirected$membership
+)
+
+american_countries <- c("United States", "Canada", "Mexico", "Brazil", "Argentina", "Chile",
+                       "Colombia", "Peru", "Venezuela", "Ecuador", "Bolivia", "Paraguay",
+                       "Uruguay", "Guyana", "Suriname", "French Guiana", "Belize", "Honduras",
+                       "El Salvador", "Nicaragua", "Costa Rica", "Panama", "Jamaica", "Trinidad and Tobago",
+                       "Saint Lucia", "Barbados", "Saint Vincent and the Grenadines", "Grenada",
+                       "Saint Kitts and Nevis", "Antigua and Barbuda", "Dominica", "Saint Pierre and Miquelon",
+                       "Guyana", "French Guiana", "Greenland", "USA")
+
+#Per togliere due isolette USA
+america_map <- map_data("world") %>%
+  filter(region %in% american_countries & long < 0)
+
+
+num_clusters <- length(unique(cluster_df$Community))
+color_palette <- brewer.pal(num_clusters, "Set1")
+
+
+ggplot() +
+  geom_polygon(data = america_map, aes(x = long, y = lat, group = group),
+               color = "black", fill = "lightgray", size = 0.5) +
+  geom_point(data = (cluster_df %>% filter(Community %in% comunita_grafico)), 
+             aes(x = Longitude, y = Latitude, color = as.factor(Community)), 
+             size = 1.2) +
+  theme_void() +
+  scale_color_manual(name = "Comunità", values = color_palette) + 
+  theme(axis.text = element_blank(),
+        axis.title = element_blank(),
+        plot.margin = margin(5, 5, 5, 5))+
+  guides(color = guide_legend(override.aes = list(size = 4))) +
+  ggtitle("   Divisione in comunità degli aeroporti a livello americano")
+
+```
+
+```{r}
+algorithms <- list(
+  Louvain = cluster_louvain(graph_undirected),
+  FastGreedy = cluster_fast_greedy(graph_undirected),
+  Walktrap = cluster_walktrap(graph_undirected),
+  Infomap = cluster_infomap(graph_undirected),
+  LabelPropagation = cluster_label_prop(graph_undirected)
+)
+
+modularity_scores <- sapply(algorithms, modularity)
+
+results <- data.frame(
+  Algorithm = names(modularity_scores),
+  Modularity = modularity_scores
+)
+
+short_names <- c("Louvain", "FastGr", "Walk", "Infomap", "LabelProp")
+barplot(results$Modularity, names.arg = short_names, col = "skyblue",
+        main = "Confronto della modularità tra diversi algoritmi",
+        ylab = "Modularità", ylim = c(0, max(results$Modularity) + 0.1))
+```
+
+Nessun algoritmo da valori di modularità adeguati per confermare che le comunità sono ben definite.
+Possiamo solo dedurre che c'è una buona divisione ma non significativa.
+
+## La quantità dei collegamenti in uscita è indicativa della qualità di un aeroporto?
+
+I 10 aeroporti con il maggior numero di collegamenti in uscita e i 10 aeroporti con l'Hub Score più alto:
+
+```{r}
+metrics_df %>% 
+  select(Nodo,Out_Degree_Centrality) %>% 
+  arrange(desc(Out_Degree_Centrality)) %>% 
+  head(10) %>% 
+  kable(
+    col.names = c("Nodo","Valore"), 
+    align = "c",
+    format = "html",
+    escape = FALSE,
+    row.names = FALSE
+  ) %>%
+  kable_styling(
+    full_width = FALSE,   
+    bootstrap_options = c("striped", "hover"), 
+    font_size = 12,       
+    position = "float_left"
+  ) %>%
+  row_spec(0, background = "steelblue", color = "white") %>% 
+  column_spec(1, width = "3em") %>%
+  column_spec(2, width = "7em") %>% 
+  add_header_above(c("Out Degree Centrality" = 2), bold = TRUE, line = TRUE)
+
+  
+metrics_df %>% 
+  select(Nodo,Hub_Score) %>% 
+  arrange(desc(Hub_Score)) %>% 
+  head(10) %>% 
+  kable(
+    col.names = c("Nodo","Valore"), 
+    align = "c",
+    format = "html",
+    escape = FALSE,
+    row.names = FALSE
+  ) %>%
+  kable_styling(
+    full_width = FALSE,   
+    bootstrap_options = c("striped", "hover"),
+    font_size = 12,     
+    position = "float_right"
+  ) %>%
+  row_spec(0, background = "steelblue", color = "white") %>%
+  column_spec(1, width = "5em") %>% 
+  column_spec(2, width = "10em") %>% 
+  add_header_above(c("Hub Score" = 2), bold = TRUE, line = TRUE)
+
+nomi_ripetuti <- intersect(metrics_df %>% 
+  arrange(desc(Out_Degree_Centrality)) %>% 
+  select(Nodo) %>% 
+  head(10) %>% pull(),
+  metrics_df %>% 
+  arrange(desc(Hub_Score)) %>%
+  select(Nodo) %>% 
+  head(10) %>% pull()
+  )
+
+```
+
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+
+Notiamo come qualche nome (`r nomi_ripetuti`) si trova in entrambe le classifiche.
+
+Vediamo se esiste una correlazione tra le seguenti misure:
+
+```{r echo=FALSE}
+top_10_hubscore=metrics_df %>% arrange(desc(Hub_Score)) %>% head(10)
+top_10_outdegree=metrics_df %>% arrange(desc(Out_Degree_Centrality)) %>% head(10)
+
+ggplot(metrics_df, aes(x = Out_Degree_Centrality, y = Hub_Score)) +
+  geom_point(color = "steelblue", alpha = 0.7) +
+  geom_text(
+    data = (union_all(top_10_hubscore,top_10_outdegree)),
+    aes(label = Nodo),
+    vjust = -0.8,
+    color = "black",
+    size = 3
+  ) +
+  geom_smooth(method = "lm", formula = y ~ x, se = FALSE, color = "darkred", linetype = "dashed") +
+  labs(
+    title = "Relazione tra Out-Degree Centrality e Hub Score",
+    x = "Out-Degree Centrality",
+    y = "Hub Score"
+  ) +
+  theme_minimal()
+```
+
+Calcoliamo il valore della correlazione usando l'indice di correlazione di Spearman.
+
+```{r echo=FALSE}
+correlation_out_degree_hub <- cor(metrics_df$Out_Degree_Centrality, metrics_df$Hub_Score,method = c("spearman"))
+```
+
+Ne risulta che il coefficiente di correlazione è `r round(correlation_out_degree_hub,2)`.
+
+## La quantità di collegamenti in entrata di un aeroporto ne determina la sua importanza nella rete?
+
+### L'importanza dei nodi da cui partono i collegamenti
+
+I 15 aeroporti con grado d'ingresso più alto e i 15 con Pagerank più alto:
+
+```{r}
+metrics_df %>% select(Nodo,In_Degree_Centrality) %>% arrange(desc(In_Degree_Centrality)) %>% head(15) %>% 
+  kable(
+    col.names = c("Nodo","Valore"), 
+    align = "c",
+    format = "html",
+    escape = FALSE,
+    row.names = FALSE
+  ) %>%
+  kable_styling(
+    full_width = FALSE,  
+    bootstrap_options = c("striped", "hover"), 
+    font_size = 12,      
+    position = "float_left" 
+  ) %>%
+  row_spec(0, background = "steelblue", color = "white") %>%
+  column_spec(1, width = "3em") %>% 
+  column_spec(2, width = "7em") %>%   
+  add_header_above(c("In Degree Centrality" = 2), bold = TRUE, line = TRUE)
+
+
+metrics_df %>% select(Nodo,PageRank) %>% arrange(desc(PageRank)) %>% head(15) %>% 
+    kable(
+    col.names = c("Nodo","Valore"), 
+    align = "c",
+    format = "html",
+    escape = FALSE,
+    row.names = FALSE
+  ) %>%
+  kable_styling(
+    full_width = FALSE,  
+    bootstrap_options = c("striped", "hover"), 
+    font_size = 12,     
+    position = "float_right"
+  ) %>%
+  row_spec(0, background = "steelblue", color = "white") %>% 
+  column_spec(1, width = "3em") %>% 
+  column_spec(2, width = "7em") %>%  
+  add_header_above(c("Pagerank" = 2), bold = TRUE, line = TRUE)
+
+```
+
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+\
+
+Possiamo pensare vedendo le prime posizioni che un aeroporto con molte connessioni in entrata riceve connessioni da nodi importanti.
+
+Calcoliamo la correlazione per verificare questa cosa.
+
+```{r}
+top_10_indegree=metrics_df %>% arrange(desc(In_Degree_Centrality)) %>% head(10)
+top_10_pagerank=metrics_df %>% arrange(desc(PageRank)) %>% head(10)
+
+ggplot(metrics_df, aes(x = In_Degree_Centrality, y = PageRank)) +
+  geom_point(color = "steelblue", alpha = 0.7) +
+  geom_text(
+    data = (union_all(top_10_indegree,top_10_pagerank)),
+    aes(label = Nodo),
+    vjust = -0.8,
+    color = "black",
+    size = 3
+  ) +
+  geom_smooth(method = "lm", formula = y ~ x, se = FALSE, color = "darkred", linetype = "dashed") +
+  labs(
+    title = "Confronto tra In-Degree-Centrality e PageRank",
+    x = "In-Degree Centrality",
+    y = "PageRank",
+  ) +
+  theme_minimal()
+corr_indegree_pagerank<-cor(metrics_df$In_Degree_Centrality,metrics_df$PageRank, method = "spearman")
+```
+
+La correlazione tra In Degree Centrality e PageRank è pari a `r round(corr_indegree_pagerank,2)` usando Spearman.
+
+### Il valore strategico dei collegamenti in ingresso
+
+Il confronto con Authority Score permette di distinguere tra aeroporti che sono semplicemente popolari e quelli che hanno un ruolo strategico nel traffico globale.
+
+```{r}
+metrics_df %>% select(Nodo,In_Degree_Centrality) %>% arrange(desc(In_Degree_Centrality)) %>% head(15) %>% 
+  kable(
+    col.names = c("Nodo","Valore"), 
+    align = "c",
+    format = "html",
+    escape = FALSE,
+    row.names = FALSE
+  ) %>%
+  kable_styling(
+    full_width = FALSE,  
+    bootstrap_options = c("striped", "hover"),
+    font_size = 12,      
+    position = "float_left"
+  ) %>%
+  row_spec(0, background = "steelblue", color = "white") %>% 
+  column_spec(1, width = "3em") %>% 
+  column_spec(2, width = "7em") %>%    
+  add_header_above(c("In Degree Centrality" = 2), bold = TRUE, line = TRUE)
+
+
+metrics_df %>% select(Nodo,Authority_Score) %>% arrange(desc(Authority_Score)) %>% head(15) %>% 
+  kable(
+    col.names = c("Nodo","Valore"), 
+    align = "c",
+    format = "html",
+    escape = FALSE,
+    row.names = FALSE
+  ) %>%
+  kable_styling(
+    full_width = FALSE,  
+    bootstrap_options = c("striped", "hover"),
+    font_size = 12,      
+    position = "float_right"  
+  ) %>%
+  row_spec(0, background = "steelblue", color = "white") %>% 
+  column_spec(1, width = "3em") %>% 
+  column_spec(2, width = "7em") %>%    
+  add_header_above(c("Authority Score" = 2), bold = TRUE, line = TRUE)
+
+top_10_authority=metrics_df %>% arrange(desc(Authority_Score)) %>% head(10)
+
+ggplot(metrics_df, aes(x = In_Degree_Centrality, y = Authority_Score)) +
+  geom_point(color = "steelblue", alpha = 0.7) +
+  geom_text(
+    data = (union_all(top_10_indegree,top_10_authority)),
+    aes(label = Nodo),
+    vjust = -0.8,
+    color = "black",
+    size = 3
+  ) +
+  geom_smooth(method = "lm", formula = y ~ x, se = FALSE, color = "darkred", linetype = "dashed") +
+  labs(
+    title = "Confronto tra In-Degree-Centrality e Authority Score",
+    x = "In-Degree Centrality",
+    y = "Authority Score",
+  ) +
+  theme_minimal()
+
+correlation_in_degree_authority <- cor(metrics_df$In_Degree_Centrality, metrics_df$Authority_Score)
+```
+
+La correlazione è pari a `r correlation_in_degree_authority`.
+
+## Qual è l'impatto della chiusura di un aeroporto o di una rotta? La resilienza della rete
+
+```{r}
+# Sottoinsieme del grafo originale per la computazione
+#nodi_europa <- V(g)[startsWith(V(g)$TZ,"Africa")|startsWith(V(g)$TZ,"Indian")|startsWith(V(g)$TZ,"Pacific")|startsWith(V(g)$TZ,"/N")]
+#sottoinsieme_europa <- induced_subgraph(g, vids = nodi_europa)
+sottoinsieme_europa <- g
+
+componenti <- components(sottoinsieme_europa, mode="strong")
+max_componente <- which.max(componenti$csize)
+nodi_connessi <- V(sottoinsieme_europa)[componenti$membership == max_componente]
+grafo_connesso_resilienza <- induced_subgraph(sottoinsieme_europa, nodi_connessi)
+numero_nodi_g <- vcount(sottoinsieme_europa)
+numero_archi_g <- ecount(sottoinsieme_europa)
+numero_nodi_sottografo <- vcount(grafo_connesso_resilienza)
+numero_archi_sottografo <- ecount(grafo_connesso_resilienza)
+
+nodi_nella_componente <- V(grafo_connesso_resilienza)$name
+nodi_nel_sottoinsieme <- V(sottoinsieme_europa)$name
+nodi_esclusi <- setdiff(nodi_nel_sottoinsieme, nodi_nella_componente)
+```
+
+Il grafo considerato è rappresentato dalla Componente Fortemente Connessa più grande che possiede `r numero_nodi_sottografo` nodi contro i `r numero_nodi_g` originali e `r numero_archi_sottografo` archi contro i `r numero_archi_g` originali.
+Il diametro del grafo è `r diameter(grafo_connesso_resilienza)`.
+
+Usiamo il diametro come misura per determinare le variazioni nel grafo.
+
+```{r}
+resilienza_diametro_archi_parallel <- function(grafo) {
+  archi <- igraph::as_data_frame(grafo, what = "edges") 
+  cl <- makeCluster(detectCores() - 1)
+    clusterExport(cl, varlist = c("grafo", "archi"), envir = environment())
+    clusterEvalQ(cl, library(igraph))
+    risultati <- parSapply(cl, seq_len(nrow(archi)), function(i) {
+    # Rimuove l'arco specifico
+    g_temp <- delete_edges(grafo, E(grafo, P = c(archi[i, 1], archi[i, 2])))
+    # Controlla la connessione e calcola il diametro
+    if (is_connected(g_temp)) {
+      return(diameter(g_temp))
+    } else {
+      return(0)
+    }
+  })
+  stopCluster(cl) 
+  names(risultati) <- apply(archi, 1, function(x) paste(x[1], "-", x[2]))
+  return(risultati)
+}
+
+resilienza_diametro_nodi_parallel <- function(grafo) {
+  nodi <- V(grafo)
+  cl <- makeCluster(detectCores() - 1)
+  clusterExport(cl, varlist = c("grafo", "nodi"), envir = environment())
+  clusterEvalQ(cl, library(igraph))
+  risultati <- parSapply(cl, seq_along(nodi), function(i) {
+    # Rimuovi un nodo specifico
+    g_temp <- delete_vertices(grafo, i)
+    # Controlla la connessione e calcola il diametro
+    if (is_connected(g_temp)) {
+      return(diameter(g_temp))
+    } else {
+      return(0)
+    }
+  })
+  stopCluster(cl)
+  names(risultati) <- V(grafo)$name
+  return(risultati)
+}
+
+
+#Riduzione della computazione: lettura del file o calcolo e salvataggio
+if (file.exists("resilienza_nodi.rds")) {
+  resilienza_nodi <- readRDS("resilienza_nodi.rds")
+} else {
+  resilienza_nodi <- resilienza_diametro_nodi_parallel(grafo_connesso_resilienza)
+  saveRDS(resilienza_nodi, file = "resilienza_nodi.rds")
+}
+if (file.exists("resilienza_archi.rds")) {
+  resilienza_archi <- readRDS("resilienza_archi.rds")
+} else {
+  resilienza_archi <- resilienza_diametro_archi_parallel(grafo_connesso_resilienza)
+  saveRDS(resilienza_archi, file = "resilienza_archi.rds")
+}
+
+resilienza_nodi <- resilienza_nodi[!is.na(resilienza_nodi)]
+
+resilienza_nodi <- sort(resilienza_nodi, decreasing = TRUE)
+resilienza_archi <- sort(resilienza_archi, decreasing = TRUE)
+
+
+
+diametro_grafo <- diameter(grafo_connesso_resilienza)
+
+nodi_critici_maggiore <- sort(resilienza_nodi[resilienza_nodi > diametro_grafo], decreasing = TRUE)
+nodi_critici_minore <- sort(resilienza_nodi[resilienza_nodi < diametro_grafo & resilienza_nodi > 0], decreasing = FALSE)
+nodi_critici_zero <- resilienza_nodi[resilienza_nodi==0]
+nodi_critici_diametro <- resilienza_nodi[resilienza_nodi==diametro_grafo]
+
+archi_critici_maggiore <- sort(resilienza_archi[resilienza_archi > diametro_grafo], decreasing = TRUE)
+archi_critici_minore <- sort(resilienza_archi[resilienza_archi < diametro_grafo & resilienza_archi > 0], decreasing = FALSE)
+archi_critici_zero <- resilienza_archi[resilienza_archi==0]
+archi_critici_diametro <- resilienza_archi[resilienza_archi==diametro_grafo]
+
+data_combinata <- data.frame(
+  valori = c(nodi_critici_maggiore, diametro_grafo, nodi_critici_minore),
+  gruppo = c(
+    rep("Nodi Critici Maggiore", length(nodi_critici_maggiore)),
+    "Diametro grafo",
+    rep("Nodi Critici Minore", length(nodi_critici_minore))
+  )
+)
+
+data_combinata_archi <- data.frame(
+  valori = c(archi_critici_maggiore, diametro_grafo, archi_critici_minore),
+  gruppo = c(
+    rep("Archi Critici Maggiore", length(archi_critici_maggiore)),
+    "Diametro grafo",
+    rep("Archi Critici Minore", length(archi_critici_minore))
+  )
+)
+
+data_combinata_norm <- data_combinata %>%
+  group_by(gruppo, valori) %>%
+  summarise(frequenza = n(), .groups = "drop") %>%
+  mutate(frequenza_norm = frequenza / sum(frequenza))
+
+data_combinata_archi_norm <- data_combinata_archi %>%
+  group_by(gruppo, valori) %>%
+  summarise(frequenza = n(), .groups = "drop") %>%
+  mutate(frequenza_norm = frequenza / sum(frequenza))
+
+
+
+grado_nodi <- degree(grafo_connesso_resilienza)
+
+nodi_critici_df <- data.frame(
+  IATA = c(names(nodi_critici_minore),names(nodi_critici_maggiore)),
+  Valore = c(nodi_critici_minore,nodi_critici_maggiore)
+) %>% 
+  mutate(Color = ifelse(as.numeric(Valore) > diameter(g), "up", "down"))
+
+
+archi_critici_df <- data.frame(
+  IATA = c(names(archi_critici_minore),names(archi_critici_maggiore)),
+  Valore = c(sub(" -.*", "", archi_critici_minore),sub(" -.*", "", archi_critici_maggiore))
+) %>% 
+  mutate(Color = ifelse(as.numeric(Valore) > diameter(g), "up", "down"))
+
+
+routes_coords_modify <- routes_coords %>% 
+  mutate(IATA = paste(from,"-",to)) %>% 
+  select(-from, -to)
+
+nodi_critici_df <- inner_join(nodi_critici_df, airports_clear_zero, by = "IATA")
+archi_critici_df <- inner_join(archi_critici_df, routes_coords_modify, by = "IATA")
+
+
+diam_path <- get_diameter(g, directed = TRUE, weights = NULL)
+
+  # Crea un dataframe con gli archi del percorso del diametro
+  diam_edges <- data.frame(
+    from = head(diam_path, -1),
+    to = tail(diam_path, -1)
+  )
+  
+  from_names <- V(g)$name[as.numeric(diam_edges$from)]
+  to_names <- V(g)$name[as.numeric(diam_edges$to)]
+  
+  diam_edges <- diam_edges %>%
+    mutate(
+      from_name = from_names,
+      to_name = to_names
+    )
+  
+  diam_edges_coords <- diam_edges %>%
+    left_join(nodes, by = c("from_name" = "IATA")) %>%
+    rename(lon_from = lon, lat_from = lat) %>%
+    left_join(nodes, by = c("to_name" = "IATA")) %>%
+    rename(lon_to = lon, lat_to = lat)
+  
+  # Filtra i nodi coinvolti nel percorso del diametro
+  diam_nodes <- nodes %>% filter(IATA %in% V(g)$name[diam_path])
+  
+  ggplot() +
+    geom_polygon(data = world_map, aes(x = long, y = lat, group = group), 
+                 fill = "lightgrey", color = "black") +
+    geom_curve(data = diam_edges_coords, aes(x = lon_from, y = lat_from, xend = lon_to, yend = lat_to), 
+               color = "blue", linewidth = 1, curvature = 0.2) +
+    geom_point(data = diam_nodes, aes(x = lon, y = lat), color = "red", size = 1.8) +
+    theme_void()+
+    ggtitle("     Il percorso del diametro nella rete")
+```
+
+I nodi coinvolti nel diametro:
+
+```{r}
+nodi_diametro_df <- data.frame(
+  IATA = diam_path$name
+) %>% 
+  inner_join(airports_clear_zero, by = "IATA") %>% 
+  select(IATA, Name, City, Country)
+
+kable(
+    nodi_diametro_df,
+    col.names = c("IATA","Name","City","Country"), 
+    align = "c",
+    format = "html",
+    escape = FALSE,
+    row.names = FALSE
+  ) %>%
+  kable_styling(
+    full_width = FALSE,  
+    bootstrap_options = c("striped", "hover"),
+    font_size = 12      
+  ) %>%
+  row_spec(0, background = "steelblue", color = "white") %>%
+  column_spec(1, width = "3em") %>% 
+  column_spec(2, width = "7em")   
+```
+
+Valutiamo congiuntamente le due procedure di rimozione di un nodo e la rimozione di un arco.
+
+Gli istogrammi indicano per ogni possibile valore del diametro quanti nodi o archi, una volta tolti, rendono la rete con quel diametro.
+
+```{r fig.height=5, fig.width=8}
+p1 <- ggplot(data_combinata_norm, aes(x = valori, y = frequenza_norm, fill = gruppo)) +
+  geom_col(
+    position = "dodge",
+    color = "black"
+  ) +
+  geom_text(
+    aes(label = frequenza), 
+    position = position_dodge(width = 0.9),  
+    vjust = -0.5, 
+    size = 5 
+  ) +
+  scale_x_continuous(
+    breaks = seq(
+      floor(min(data_combinata_norm$valori)),
+      ceiling(max(data_combinata_norm$valori)),
+      by = 1
+    )
+  ) +
+  scale_y_continuous(
+    breaks = seq(
+      0.0,
+      ceiling(max(data_combinata_norm$frequenza_norm)),
+      by = 0.1
+    ),
+    expand = expansion(mult = c(0, 0.1)) 
+
+  ) +
+  scale_fill_manual(
+    values = c("Nodi Critici Maggiore" = "lightblue", "Diametro grafo" = "red", "Nodi Critici Minore" = "lightgreen")
+  ) +
+  labs(
+    title = "Resilienza ai nodi critici",
+    x = "Diametro",
+    y = "Frequenza relativa globale",
+    fill = "Gruppo"
+  ) +
+  theme_minimal()
+
+
+p2 <- ggplot(data_combinata_archi_norm, aes(x = valori, y = frequenza_norm, fill = gruppo)) +
+  geom_col(
+    position = "dodge",
+    color = "black"
+  ) +
+  geom_text(
+    aes(label = frequenza),  
+    position = position_dodge(width = 0.9),  
+    vjust = -0.5,  
+    size = 5 
+  ) +
+  scale_x_continuous(
+    breaks = seq(
+      floor(min(data_combinata_archi_norm$valori)),
+      ceiling(max(data_combinata_archi_norm$valori)),
+      by = 1
+    )
+  ) +
+  scale_y_continuous(
+    breaks = seq(
+      0.0,
+      ceiling(max(data_combinata_archi_norm$frequenza_norm)),
+      by = 0.1
+    ),
+    expand = expansion(mult = c(0, 0.1))  
+
+  ) +
+  scale_fill_manual(
+    values = c("Archi Critici Maggiore" = "orange", "Diametro grafo" = "red", "Archi Critici Minore" = "purple")
+  ) +
+  labs(
+    title = "Resilienza agli archi critici",
+    x = "Diametro",
+    y = "Frequenza relativa globale",
+    fill = "Gruppo"
+  ) +
+  theme_minimal()
+
+grid.arrange(p1, p2, ncol = 2, widths = unit(c(0.5, 0.5), "npc"))
+```
+
+Ci sono `r length(nodi_critici_diametro)` nodi che una volta rimossi non modificano il diametro della rete, `r length(nodi_critici_maggiore)` che fanno aumentare questo valore e `r length(nodi_critici_minore)` che fanno diminuire questo valore.
+
+Parlando di archi, ce ne sono `r length(archi_critici_diametro)` che una volta rimossi non modificano il diametro della rete, `r length(archi_critici_maggiore)` che fanno aumentare questo valore e `r length(archi_critici_minore)` che fanno diminuire questo valore.
+
+I nodi e gli archi che rendono la rete disconnessa sono identificati con il valore 0 nel calcolo del diametro e sono rispettivamente `r length(nodi_critici_zero)` e `r length(archi_critici_zero)`.
+
+### **Quali nodi permettono di diminuire e aumentare il diametro se rimossi?**
+
+```{r fig.height=4, fig.width=8}
+
+ggplot() +
+  geom_polygon(data = world_map, aes(x = long, y = lat, group = group),color = "black", fill = "lightgray", size = 0.1) +
+  geom_point(data = nodi_critici_df, aes(x = Longitude, y = Latitude, color = Color), size = 2) +
+   scale_color_manual(
+    name = "Impatto sul diametro", 
+    values = c("up" = "red", "down" = "blue"),
+    labels = c("up" = "maggiore", "down" = "minore")
+  ) +
+  theme_minimal() +
+  theme(axis.text = element_blank(), axis.title = element_blank(), plot.margin = margin(0, 0, 0, 0)) +
+  ggtitle("   Nodi che permettono di modificare il diametro se rimossi")
+
+nodi_critici_grado <- grado_nodi[names(grado_nodi) %in% nodi_critici_df$IATA]
+nodi_critici_tabella_df <- nodi_critici_df %>% 
+  mutate(Degree = nodi_critici_grado) %>% 
+  select(IATA, Valore, Name, Country, Degree)
+
+archi_critici_tabella_df <- archi_critici_df %>% select(IATA, Valore)
+
+
+
+kable(
+    nodi_critici_tabella_df,
+    col.names = c("IATA","Diametro","Name","Country","Grado"), 
+    align = "c",
+    format = "html",
+    escape = FALSE,
+    row.names = FALSE
+  ) %>%
+  kable_styling(
+    full_width = FALSE,  
+    bootstrap_options = c("striped", "hover"),
+    font_size = 12      
+  ) %>%
+  row_spec(0, background = "steelblue", color = "white") %>% 
+  column_spec(1, width = "3em") %>%
+  column_spec(2, width = "7em")    
+
+# kable(
+#     archi_critici_tabella_df,
+#     col.names = c("IATA","Diametro"), 
+#     align = "c",
+#     format = "html",
+#     escape = FALSE,
+#     row.names = FALSE
+#   ) %>%
+#   kable_styling(
+#     full_width = FALSE,   # Ridurre la larghezza della tabella
+#     bootstrap_options = c("striped", "hover"), # Stile alternato delle righe
+#     font_size = 12        # Ridurre la dimensione del carattere
+#   ) %>%
+#   row_spec(0, background = "steelblue", color = "white") %>% # Intestazione azzurra con testo bianco
+#   column_spec(1, width = "8em") %>% # Colonna "Nodo" più stretta
+#   column_spec(2, width = "7em")     # Colonna "Out Degree Centrality" più larga
+
+
+nodi_diametro <- intersect(nodi_diametro_df$IATA,nodi_critici_tabella_df$IATA)
+
+```
+
+Molti di questi nodi appartengono al percorso del diametro: `r nodi_diametro`.
+
+Per esempio i nodi "FKI" e "YTS" appartengono al percorso del diametro del grafo ma se rimossi il valore del diametro cambia in modo differente.
+
+### **In generale la rete è resiliente?**
+
+Il numero di nodi che una volta rimossi portano la rete a diametro zero è `r length(nodi_critici_zero)`.
+Considerando questo numero rispetto al numero totale di nodi nel grafo (`r vcount(grafo_connesso_resilienza)`) si può dire che la rete può essere considerata resiliente, cioè ha una buona capacità di sopportare perdite di nodi senza compromettere la sua connettività globale.
+Questi nodi incidono per un `r round(length(nodi_critici_zero)/vcount(grafo_connesso_resilienza)*100,2)`%.
+
+## Quali aeroporti fungono da snodi chiave per il traffico aereo?
+
+```{r}
+centralita_betweenness <- head(sort(betweenness(g, normalized = TRUE),decreasing = TRUE),n=10)
+
+centralita_betweenness_df <- data.frame(
+  Nodo = names(centralita_betweenness),
+  Betweenness = centralita_betweenness
+)
+centralita_betweenness_df = centralita_betweenness_df %>% 
+  left_join(airports,by = join_by(Nodo==IATA)) %>%
+  select(Nodo,Betweenness,Name,City,Country,Latitude,Longitude) %>% 
+  mutate(Rank = row_number())  #Assegna il numero di classifica
+
+centralita_betweenness_df$Latitude=as.numeric(centralita_betweenness_df$Latitude)
+centralita_betweenness_df$Longitude=as.numeric(centralita_betweenness_df$Longitude)
+
+ggplot() +
+  geom_polygon(data = world_map, aes(x = long, y = lat, group = group),color = "black", fill = "lightgray", size = 0.5) +
+  geom_point(data = centralita_betweenness_df, aes(x = Longitude, y = Latitude), color = "red", size = 4) +
+geom_text(data = centralita_betweenness_df, aes(x = Longitude, y = Latitude, 
+                                                  label = paste0("bold(", Rank, ")")), 
+            color = "black", vjust = 0.35, size = 3.5, parse = TRUE) +
+  theme_void() +
+  theme(axis.text = element_blank(),
+        axis.title = element_blank(),
+        plot.margin = margin(0, 0, 0, 0)) +
+  ggtitle("   I 10 Aeroporti con Betweenness più alta")
+
+```
+
+```{r}
+kable(
+  (centralita_betweenness_df %>% select(Nodo,Betweenness,Name,City,Country)),
+  col.names = c("Nodo", "Betweenness", "Name", "City", "Country"), align = "c")
+```
+
+# Conclusioni
+
+## Conclusioni
+
+L'analisi degli aeroporti e dei loro collegamenti ha messo in luce molteplici aspetti significativi caratteristici di una rete complessa:
+
+- una marcata eterogeneità nella distribuzione della connettività
+- la formazione di comunità rispetto ai confini fisici
+- come la rete supporta il fallimento dei nodi
+
+
